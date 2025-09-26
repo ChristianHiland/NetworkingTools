@@ -1,5 +1,7 @@
+from dnslib import DNSRecord, DNSHeader, DNSQuestion, RR, A, QTYPE
 import socket
-from dnslib import DNSRecord, DNSHeader, DNSQuestion, RR, A
+import json
+
 
 # Define the DNS server's IP and port
 HOST_IP = '127.0.0.1'
@@ -11,10 +13,10 @@ FORWARD_DNS = ('8.8.8.8', 53)
 LOGS = []
 
 # A simple dictionary acting as our DNS zone file
-ZONE_FILE = {
-    'example.com': '93.184.216.34',
-    'test.local': '192.168.1.100'
-}
+ZONE_FILE = None
+with open("ZONE_FILE.json", "r") as file:
+    ZONE_FILE = json.load(file)
+
 
 def resolve_forward(query_data):
     """
@@ -46,15 +48,36 @@ def handle_query(data, addr, sock):
 
         # Check if the domain is in our local zone file
         if q_name in ZONE_FILE:
-            # Create a response from our local zone
-            reply = DNSRecord(
-                DNSHeader(id=query.header.id, qr=1, aa=1, ra=1),
-                q=DNSQuestion(q_name)
-            )
-            reply.add_answer(RR(q_name, A, rdata=A(ZONE_FILE[q_name]), ttl=60))
-            sock.sendto(reply.pack(), addr)
-            LOGS.append(f"Local lookup successful. Sent reply for {q_name}.\n")
-            print(f"Local lookup successful. Sent reply for {q_name}.")
+            if ZONE_FILE[q_name].startswith("redirect:"):
+                forward_url = ZONE_FILE[q_name].replace("redirect:", "")
+                temp_query = DNSRecord.question(forward_url)
+                forward_respone = resolve_forward(temp_query.pack())
+                # Parse the forwarded response to extract the IP
+                forward_record = DNSRecord.parse(forward_respone)
+                if forward_respone:
+                    if forward_record.rr:
+                        # Grab the first A record's IP from the answer section
+                        resolved_ip = str(forward_record.rr[0].rdata)
+                        print(f"Returned IP: {resolved_ip}")
+                        
+                        # Create a new response packet with the redirected IP
+                        reply = DNSRecord(
+                            DNSHeader(id=query.header.id, qr=1, aa=1, ra=1),
+                            q=DNSQuestion(q_name)
+                        )
+                        reply.add_answer(RR(q_name, rtype=QTYPE.A, rdata=A(resolved_ip), ttl=60))
+                        sock.sendto(reply.pack(), addr)
+                        print(f"Successfully redirected {q_name} to {resolved_ip}")
+            else:
+                # Create a response from our local zone
+                reply = DNSRecord(
+                    DNSHeader(id=query.header.id, qr=1, aa=1, ra=1),
+                    q=DNSQuestion(q_name)
+                )
+                reply.add_answer(RR(q_name, A, rdata=A(ZONE_FILE[q_name]), ttl=60))
+                sock.sendto(reply.pack(), addr)
+                LOGS.append(f"Local lookup successful. Sent reply for {q_name}.\n")
+                print(f"Local lookup successful. Sent reply for {q_name}.")
         elif q_name == "quit.local.":
             with open("logs.log", "w") as file:
                 file.writelines(LOGS)
